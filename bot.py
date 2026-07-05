@@ -35,12 +35,25 @@ def get_precision(symbol: str) -> tuple[int, int]:
     return 3, 2
 
 
-def get_qty(symbol: str, usdt_amount: float) -> float:
-    """Calcula cantidad de monedas dado un monto en USDT."""
-    ticker    = client.ticker_price(symbol=symbol)
-    price     = float(ticker["price"])
-    qty_p, _  = get_precision(symbol)
-    qty       = round(usdt_amount / price, qty_p)
+def get_equity() -> float:
+    """Obtiene el balance disponible en USDT de la cuenta."""
+    account = client.account()
+    for asset in account["assets"]:
+        if asset["asset"] == "USDT":
+            return float(asset["availableBalance"])
+    return 0.0
+
+
+def get_qty(symbol: str) -> float:
+    """Calcula cantidad de monedas usando el % del equity actual (igual que TradingView)."""
+    equity        = get_equity()
+    margen        = equity * (config.POS_PCT / 100)
+    nocional      = margen * config.LEVERAGE
+    ticker        = client.ticker_price(symbol=symbol)
+    price         = float(ticker["price"])
+    qty_p, _      = get_precision(symbol)
+    qty           = round(nocional / price, qty_p)
+    log.info(f"Equity: ${equity:.2f} | Margen: ${margen:.2f} | Nocional: ${nocional:.2f} | Qty: {qty}")
     return qty
 
 
@@ -106,8 +119,8 @@ def webhook():
     # 2. Configurar apalancamiento
     set_leverage(symbol, config.LEVERAGE)
 
-    # 3. Calcular cantidad
-    qty = get_qty(symbol, config.USDT_PER_TRADE)
+    # 3. Calcular cantidad dinámica según equity actual
+    qty = get_qty(symbol)
     if qty <= 0:
         return jsonify({"error": "Cantidad calculada es 0"}), 400
 
@@ -183,7 +196,6 @@ def webhook():
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "bot activo ✅"})
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
