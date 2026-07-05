@@ -4,8 +4,11 @@
 
 # Binance Testnet Futures
 # Obtén tus keys en: https://testnet.binancefuture.com
-API_KEY    = "JcDMMDPpa6vVOa93vfsca4MjKUBhJwHRIhdQy7xp5KCgEmyXIYzZ1O9uhqBqVpx3"
-API_SECRET = "hn3GGtm0n33GDDWHa4IcXvbNU6Kmp2WAflNyF9FOFLDNQfcncNZcOCTgfsEwVgRU"
+
+import os
+
+API_KEY    = os.environ.get("API_KEY")
+API_SECRET = os.environ.get("API_SECRET")
 
 BASE_URL   = "https://demo-fapi.binance.com"  # Cambiar a https://fapi.binance.com para real
 
