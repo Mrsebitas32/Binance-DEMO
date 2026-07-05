@@ -137,7 +137,7 @@ def webhook():
     log.info(f"Señal recibida: {data}")
 
     action = data.get("action", "").lower()
-    symbol = data.get("symbol", config.DEFAULT_SYMBOL).upper()
+    symbol = data.get("symbol", config.DEFAULT_SYMBOL).upper().replace(".P", "").replace("-PERP", "")
 
     if action not in ("long", "short", "close"):
         return jsonify({"error": f"Acción desconocida: {action}"}), 400
