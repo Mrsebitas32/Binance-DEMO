@@ -84,8 +84,8 @@ def place_algo_sltp(symbol, side, order_type, stop_price, price_p):
     params = (
         f"symbol={symbol}"
         f"&side={side}"
+        f"&type={order_type}"
         f"&algoType=CONDITIONAL"
-        f"&orderType={order_type}"
         f"&closePosition=true"
         f"&triggerPrice={stop_str}"
         f"&workingType=MARK_PRICE"
