@@ -4,6 +4,9 @@ from binance.error import ClientError
 import config
 import logging
 import time
+import hmac
+import hashlib
+import requests as req
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
@@ -69,21 +72,28 @@ def close_position(symbol):
         log.error(f"Error cerrando: {e}")
 
 def place_sltp(symbol, side, order_type, stop_price, price_p):
-    """Intenta colocar SL o TP — si falla, solo loguea y continúa."""
-    try:
-        stop_str = f"{stop_price:.{price_p}f}"
-        order = client.new_order(
-            symbol        = symbol,
-            side          = side,
-            type          = order_type,
-            stopPrice     = stop_str,
-            closePosition = "true",
-            workingType   = "MARK_PRICE",
-            timeInForce   = "GTE_GTC"
-        )
-        log.info(f"{order_type} @ {stop_str}: OK — {order}")
-    except ClientError as e:
-        log.warning(f"{order_type} falló (no crítico): {e}")
+    """Coloca SL o TP via /fapi/v1/order con closePosition=true."""
+    stop_str  = f"{stop_price:.{price_p}f}"
+    timestamp = int(time.time() * 1000)
+    params    = (
+        f"symbol={symbol}"
+        f"&side={side}"
+        f"&type={order_type}"
+        f"&stopPrice={stop_str}"
+        f"&closePosition=true"
+        f"&workingType=MARK_PRICE"
+        f"&timeInForce=GTE_GTC"
+        f"&timestamp={timestamp}"
+    )
+    sig  = hmac.new(config.API_SECRET.encode(), params.encode(), hashlib.sha256).hexdigest()
+    url  = f"{config.BASE_URL}/fapi/v1/order"
+    hdrs = {"X-MBX-APIKEY": config.API_KEY}
+    r    = req.post(f"{url}?{params}&signature={sig}", headers=hdrs)
+    data = r.json()
+    if "orderId" in data:
+        log.info(f"✅ {order_type} @ {stop_str}: OK | ID: {data['orderId']}")
+    else:
+        log.warning(f"⚠️ {order_type} @ {stop_str}: {data}")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -103,7 +113,6 @@ def webhook():
         close_position(symbol)
         return jsonify({"status": "cerrado", "symbol": symbol})
 
-    # ── Entrada ──
     close_position(symbol)
     set_margin_isolated(symbol)
     set_leverage(symbol)
@@ -116,14 +125,12 @@ def webhook():
 
     try:
         order = client.new_order(symbol=symbol, side=side, type="MARKET", quantity=qty)
-        log.info(f"✅ Orden ejecutada: {side} {qty} {symbol} | ID: {order['orderId']}")
+        log.info(f"✅ Orden: {side} {qty} {symbol} | ID: {order['orderId']}")
 
-        # Intentar SL y TP — si fallan no bloquea la respuesta
-        entry    = float(client.ticker_price(symbol=symbol)["price"])
+        entry      = float(client.ticker_price(symbol=symbol)["price"])
         _, price_p = get_precision(symbol)
-
-        sl_pct = config.SL_PCT / 100
-        tp_pct = config.TP_PCT / 100
+        sl_pct     = config.SL_PCT / 100
+        tp_pct     = config.TP_PCT / 100
 
         if action == "long":
             sl_price  = round(entry * (1 - sl_pct), price_p)
@@ -138,13 +145,8 @@ def webhook():
         place_sltp(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, price_p)
 
         return jsonify({
-            "status"  : "ok",
-            "action"  : action,
-            "symbol"  : symbol,
-            "qty"     : qty,
-            "entry"   : entry,
-            "sl"      : sl_price,
-            "tp"      : tp_price,
+            "status": "ok", "action": action, "symbol": symbol,
+            "qty": qty, "entry": entry, "sl": sl_price, "tp": tp_price,
             "order_id": order["orderId"]
         })
 
