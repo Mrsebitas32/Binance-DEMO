@@ -67,6 +67,7 @@ def place_algo_sltp(symbol, side, stop_type, stop_price, price_p):
     params = "&".join([
         f"symbol={symbol}",
         f"side={side}",
+        f"algoType=VP",
         f"positionSide=BOTH",
         f"type={stop_type}",
         f"quantity=0",
