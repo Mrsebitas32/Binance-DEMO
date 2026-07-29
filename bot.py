@@ -1,23 +1,12 @@
 from flask import Flask, request, jsonify
 from binance.um_futures import UMFutures
 from binance.error import ClientError
-import config
-import logging
-import time
-import hmac
-import hashlib
-import requests as req
+import config, logging, time, hmac, hashlib, requests as req
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
-
 app = Flask(__name__)
-
-client = UMFutures(
-    key      = config.API_KEY,
-    secret   = config.API_SECRET,
-    base_url = config.BASE_URL
-)
+client = UMFutures(key=config.API_KEY, secret=config.API_SECRET, base_url=config.BASE_URL)
 
 def get_precision(symbol):
     info = client.exchange_info()
@@ -71,40 +60,41 @@ def close_position(symbol):
     except ClientError as e:
         log.error(f"Error cerrando: {e}")
 
-def place_sltp(symbol, side, order_type, stop_price, price_p):
-    """Coloca SL o TP via /fapi/v1/order con closePosition=true."""
+def place_algo_sltp(symbol, side, stop_type, stop_price, price_p):
+    """Usa /fapi/v1/algoOrder — único endpoint válido en Binance Demo."""
     stop_str  = f"{stop_price:.{price_p}f}"
     timestamp = int(time.time() * 1000)
-    params    = (
-        f"symbol={symbol}"
-        f"&side={side}"
-        f"&type={order_type}"
-        f"&stopPrice={stop_str}"
-        f"&closePosition=true"
-        f"&workingType=MARK_PRICE"
-        f"&timeInForce=GTE_GTC"
-        f"&timestamp={timestamp}"
-    )
+    params = "&".join([
+        f"symbol={symbol}",
+        f"side={side}",
+        f"positionSide=BOTH",
+        f"type={stop_type}",
+        f"quantity=0",
+        f"reduceOnly=true",
+        f"stopPrice={stop_str}",
+        f"workingType=MARK_PRICE",
+        f"priceProtect=false",
+        f"timestamp={timestamp}"
+    ])
     sig  = hmac.new(config.API_SECRET.encode(), params.encode(), hashlib.sha256).hexdigest()
-    url  = f"{config.BASE_URL}/fapi/v1/order"
-    hdrs = {"X-MBX-APIKEY": config.API_KEY}
-    r    = req.post(f"{url}?{params}&signature={sig}", headers=hdrs)
+    url  = f"{config.BASE_URL}/fapi/v1/algoOrder"
+    hdrs = {"X-MBX-APIKEY": config.API_KEY, "Content-Type": "application/x-www-form-urlencoded"}
+    r    = req.post(url, data=params + f"&signature={sig}", headers=hdrs)
     data = r.json()
-    if "orderId" in data:
-        log.info(f"✅ {order_type} @ {stop_str}: OK | ID: {data['orderId']}")
+    if "algoId" in data or "orderId" in data:
+        log.info(f"✅ {stop_type} @ {stop_str}: OK")
     else:
-        log.warning(f"⚠️ {order_type} @ {stop_str}: {data}")
+        log.warning(f"⚠️ {stop_type} @ {stop_str}: {data}")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "JSON inválido"}), 400
-
     log.info(f"Señal recibida: {data}")
-
     action = data.get("action", "").lower()
-    symbol = data.get("symbol", config.DEFAULT_SYMBOL).upper().replace("BINANCE:","").replace(".P","").replace("-PERP","")
+    symbol = data.get("symbol", config.DEFAULT_SYMBOL).upper()\
+                 .replace("BINANCE:","").replace(".P","").replace("-PERP","")
 
     if action not in ("long", "short", "close"):
         return jsonify({"error": f"Acción desconocida: {action}"}), 400
@@ -141,14 +131,12 @@ def webhook():
             tp_price  = round(entry * (1 - tp_pct), price_p)
             exit_side = "BUY"
 
-        place_sltp(symbol, exit_side, "STOP_MARKET",        sl_price, price_p)
-        place_sltp(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, price_p)
+        place_algo_sltp(symbol, exit_side, "STOP_MARKET",        sl_price, price_p)
+        place_algo_sltp(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, price_p)
 
-        return jsonify({
-            "status": "ok", "action": action, "symbol": symbol,
-            "qty": qty, "entry": entry, "sl": sl_price, "tp": tp_price,
-            "order_id": order["orderId"]
-        })
+        return jsonify({"status":"ok","action":action,"symbol":symbol,
+                        "qty":qty,"entry":entry,"sl":sl_price,"tp":tp_price,
+                        "order_id":order["orderId"]})
 
     except ClientError as e:
         log.error(f"Error entrada: {e}")
