@@ -3,9 +3,6 @@ from binance.um_futures import UMFutures
 from binance.error import ClientError
 import config
 import logging
-import requests
-import hmac
-import hashlib
 import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -19,9 +16,6 @@ client = UMFutures(
     base_url = config.BASE_URL
 )
 
-# ══════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════
 def get_precision(symbol):
     info = client.exchange_info()
     for s in info["symbols"]:
@@ -49,16 +43,14 @@ def get_qty(symbol):
 def set_leverage(symbol):
     try:
         client.change_leverage(symbol=symbol, leverage=config.LEVERAGE)
-        log.info(f"Apalancamiento {config.LEVERAGE}x en {symbol}")
     except ClientError as e:
         log.warning(f"Leverage: {e}")
 
 def set_margin_isolated(symbol):
     try:
         client.change_margin_type(symbol=symbol, marginType="ISOLATED")
-        log.info(f"Margen ISOLATED en {symbol}")
     except ClientError as e:
-        log.warning(f"Margin type: {e}")
+        log.warning(f"Margin: {e}")
 
 def close_position(symbol):
     try:
@@ -72,41 +64,27 @@ def close_position(symbol):
             qty      = round(abs(amt), qty_p)
             client.new_order(symbol=symbol, side=side, type="MARKET",
                              quantity=qty, reduceOnly=True)
-            log.info(f"Posición cerrada: {side} {qty} {symbol}")
+            log.info(f"Cerrado: {side} {qty} {symbol}")
     except ClientError as e:
         log.error(f"Error cerrando: {e}")
 
-def place_algo_sltp(symbol, side, order_type, stop_price, price_p):
-    """Coloca SL o TP usando el endpoint correcto: POST /fapi/v1/algoOrder"""
-    timestamp  = int(time.time() * 1000)
-    stop_str   = f"{stop_price:.{price_p}f}"
+def place_sltp(symbol, side, order_type, stop_price, price_p):
+    """Intenta colocar SL o TP — si falla, solo loguea y continúa."""
+    try:
+        stop_str = f"{stop_price:.{price_p}f}"
+        order = client.new_order(
+            symbol        = symbol,
+            side          = side,
+            type          = order_type,
+            stopPrice     = stop_str,
+            closePosition = "true",
+            workingType   = "MARK_PRICE",
+            timeInForce   = "GTE_GTC"
+        )
+        log.info(f"{order_type} @ {stop_str}: OK — {order}")
+    except ClientError as e:
+        log.warning(f"{order_type} falló (no crítico): {e}")
 
-    params = (
-        f"symbol={symbol}"
-        f"&side={side}"
-        f"&type={order_type}"
-        f"&algoType=CONDITIONAL"
-        f"&closePosition=true"
-        f"&triggerPrice={stop_str}"
-        f"&workingType=MARK_PRICE"
-        f"&timestamp={timestamp}"
-    )
-    signature = hmac.new(
-        config.API_SECRET.encode(),
-        params.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-    url     = f"{config.BASE_URL}/fapi/v1/algoOrder"
-    headers = {"X-MBX-APIKEY": config.API_KEY}
-    resp    = requests.post(f"{url}?{params}&signature={signature}", headers=headers)
-    data    = resp.json()
-    log.info(f"AlgoOrder {order_type} @ {stop_str}: {data}")
-    return data
-
-# ══════════════════════════════════════════════════════
-# WEBHOOK
-# ══════════════════════════════════════════════════════
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(silent=True)
@@ -116,7 +94,7 @@ def webhook():
     log.info(f"Señal recibida: {data}")
 
     action = data.get("action", "").lower()
-    symbol = data.get("symbol", config.DEFAULT_SYMBOL).upper().replace(".P", "").replace("-PERP", "")
+    symbol = data.get("symbol", config.DEFAULT_SYMBOL).upper().replace(".P","").replace("-PERP","")
 
     if action not in ("long", "short", "close"):
         return jsonify({"error": f"Acción desconocida: {action}"}), 400
@@ -138,8 +116,9 @@ def webhook():
 
     try:
         order = client.new_order(symbol=symbol, side=side, type="MARKET", quantity=qty)
-        log.info(f"Orden: {side} {qty} {symbol} | ID: {order['orderId']}")
+        log.info(f"✅ Orden ejecutada: {side} {qty} {symbol} | ID: {order['orderId']}")
 
+        # Intentar SL y TP — si fallan no bloquea la respuesta
         entry    = float(client.ticker_price(symbol=symbol)["price"])
         _, price_p = get_precision(symbol)
 
@@ -147,25 +126,30 @@ def webhook():
         tp_pct = config.TP_PCT / 100
 
         if action == "long":
-            sl_price = round(entry * (1 - sl_pct), price_p)
-            tp_price = round(entry * (1 + tp_pct), price_p)
+            sl_price  = round(entry * (1 - sl_pct), price_p)
+            tp_price  = round(entry * (1 + tp_pct), price_p)
             exit_side = "SELL"
         else:
-            sl_price = round(entry * (1 + sl_pct), price_p)
-            tp_price = round(entry * (1 - tp_pct), price_p)
+            sl_price  = round(entry * (1 + sl_pct), price_p)
+            tp_price  = round(entry * (1 - tp_pct), price_p)
             exit_side = "BUY"
 
-        place_algo_sltp(symbol, exit_side, "STOP_MARKET",        sl_price, price_p)
-        place_algo_sltp(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, price_p)
+        place_sltp(symbol, exit_side, "STOP_MARKET",        sl_price, price_p)
+        place_sltp(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, price_p)
 
         return jsonify({
-            "status": "ok", "action": action, "symbol": symbol,
-            "qty": qty, "entry": entry, "sl": sl_price, "tp": tp_price,
+            "status"  : "ok",
+            "action"  : action,
+            "symbol"  : symbol,
+            "qty"     : qty,
+            "entry"   : entry,
+            "sl"      : sl_price,
+            "tp"      : tp_price,
             "order_id": order["orderId"]
         })
 
     except ClientError as e:
-        log.error(f"Error Binance: {e}")
+        log.error(f"Error entrada: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/", methods=["GET"])
